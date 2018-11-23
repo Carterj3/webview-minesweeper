@@ -1,0 +1,21 @@
+[package]
+name = "minesweeper-backend"
+version = "0.1.0"
+authors = ["Jeffrey.Carter <JeffreyKCarter@gmail.com>"]
+publish = false
+
+[dependencies]
+web-view = "0.2.1"      # MIT
+
+serde = "1.0.75"        # MIT/Apache-2.0
+serde_derive = "1.0.75" # MIT/Apache-2.0
+serde_json = "1.0.26"   # MIT/Apache-2.0
+
+error-chain = "0.12.0"  # MIT/Apache-2.0
+
+# Logging   
+log = "0.4.5"           # MIT/Apache-2.0
+env_logger = "0.5.13"   # MIT/Apache-2.0
+
+# "joda-time" of rust
+chrono = { version = "0.4.6", features = ["serde"] } # MIT/Apache-2.0
