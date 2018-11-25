@@ -2,79 +2,121 @@ extern crate web_view;
 use web_view::*;
 
 extern crate minesweeper_backend;
-use minesweeper_backend::engine::minesweeper::*;
+use minesweeper_backend::engine::minesweeper::{Action, Minesweeper, Tile, State};
+use minesweeper_backend::common::{Horizontal, Vertical};
 
 #[macro_use]
 extern crate serde_derive;
 extern crate serde_json;
+extern crate serde;
 
-use std::time::Duration;
-use std::thread::{spawn, sleep};
+#[macro_use]
+extern crate log;
+extern crate env_logger;
+use env_logger::{Builder, Target};
+ 
+use std::thread::spawn;
 use std::sync::Mutex;
-
-/* Going faster than ~100 micro seconds appears to cause crashes, 120fps sound be way more than enough */
-const FPS_120: Duration = Duration::from_millis(8); /* 1/120 = 8.333... */
+use std::env;
 
 fn main() {
+    configure_logger();
+
     let title = "Minesweeper";
     let content = Content::Html(create_html());
 	let size = Some((800, 600));
-	let resizable = true;
-	let debug = false;
-    let _initial_callback = "Need to define type of this if it's here";
-    let _external_callback = "Need to define type of this if it's here";
+	let is_resizable = true;
+	let in_debug = false;
 
-    let state = Mutex::new(Minesweeper::new(8, 8, 10));
+    let state = Mutex::new(Minesweeper::new(Horizontal(8), Vertical(8), 10).unwrap());
  
-	run(title, content, size, resizable, debug, move |webview| {
+	run(title, content, size, is_resizable, in_debug, move |webview| {
 		spawn(move || {
             webview.dispatch(|webview, state| {
                 let game = state.lock().unwrap();
 
-                update_ui(webview, &game);
+                send_to_ui(webview, &ToUiCommand::NewField {tiles: game.get_tiles()});
+                send_to_ui(webview, &ToUiCommand::InProgress);
 
-                webview.eval(&format!("toFrontEnd({})", "'Test'"));
+                /*
+                    The examples typically have the initial callback having a loop but a loop isn't needed for Minesweeper.
+
+                    Running the loop faster than once per ~100 microseconds appears to cause crashes though.
+                */
             });
 		});
 	}, move |webview, arg, state| {
-        println!("Received: {}", arg);
+        trace!("Received from UI: {}", arg);
+
+        let mut game = state.lock().unwrap();
+
         match serde_json::from_str(arg)
         {
-            Ok(FromUiCommand::Reset) =>
+            Ok(Action::Start{ width, height, num_bombs }) => 
             {
-                // let mut counter = state.lock().unwrap();
-                // counter.reset();
+                match game.resize(Horizontal(width), Vertical(height), num_bombs)
+                {
+                    Ok(_) => {},
+                    Err(error) => error!("failed to resize because {}", error),
+                }
+                send_to_ui(webview, &ToUiCommand::NewField {tiles: game.get_tiles()});
+                send_to_ui(webview, &ToUiCommand::InProgress);
             },
-            Ok(FromUiCommand::Start{ width, height, num_bombs }) => 
+            Ok(Action::Quit) => webview.terminate(),
+            Ok(action) =>
             {
-
-            },
-            Ok(FromUiCommand::Exit) => webview.terminate(),
-            Err(error) => println!("{}", error),
-        }
+                match game.handle_action(action)
+                {
+                    Ok(_) => {},
+                    Err(error) => error!("Action failed because: {}", error),
+                }
+                send_to_ui(webview, &ToUiCommand::NewField {tiles: game.get_tiles()});
+                match game.get_state()
+                {
+                    State::Won => send_to_ui(webview, &ToUiCommand::Won),
+                    State::Loss => send_to_ui(webview, &ToUiCommand::Loss),
+                    _ => send_to_ui(webview, &ToUiCommand::InProgress),
+                };
+            }
+            Err(error) => error!("Unable to parse [{}] because {}", arg, error),
+        };
 	}, state);
 }
 
-pub fn update_ui<'a, T>(webview: &mut WebView<'a, T>, minesweeper: &Minesweeper)
+#[derive(Serialize, Debug)]
+#[serde(tag = "_type")]
+pub enum ToUiCommand<'a> {
+    Won,
+    Loss,
+    InProgress,
+    NewField { tiles: &'a Vec<Vec<Tile>> },
+}
+
+pub fn send_to_ui<'a, S, T>(webview: &mut WebView<'a, T>, data: &S)
+    where S: serde::ser::Serialize
 {
-    match serde_json::to_string(&minesweeper.get_tiles())
+    trace!("Serializing to send to UI");
+    match serde_json::to_string(data)
     {
         Ok(json) => 
         {
             webview.eval(&format!("toFrontEnd({})", json));
+            trace!("Sent to UI")
         },
-        Err(error) => {},
+        Err(error) => error!("failed to send to ui because {}", error),
     };
 }
 
-#[derive(Serialize, Deserialize)]
-#[serde(tag = "_type")]
-pub enum FromUiCommand {
-    Reset,
-    Start {width: u16, height: u16, num_bombs: u16},
-    Exit,
+fn configure_logger()
+{
+    let mut builder = Builder::new();
+    builder.target(Target::Stdout);
+    if let Ok(level) = env::var("RUST_LOG")
+    {
+        builder.parse(&level);
+    }
+    builder.init();
 }
-
 
 // TODO?: Handle this via build.rs 
 fn create_html() -> String
@@ -102,6 +144,7 @@ fn create_html() -> String
         portsJs = PORTS_JS,
     )
 }
+
 const ELM_JS: &'static str = include_str!(concat!("../../", "minesweeper-ui/elm.js"));
 const PORTS_JS: &'static str = r#"
         var app = Elm.Main.init({node: document.getElementById("view")});
