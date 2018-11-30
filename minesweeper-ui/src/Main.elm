@@ -17,7 +17,6 @@ main =
     , view = view
     }
 
-
 -- MODEL
 
 type GameState = InProgress

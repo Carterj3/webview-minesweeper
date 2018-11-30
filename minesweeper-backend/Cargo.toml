@@ -3,11 +3,12 @@ name = "minesweeper-backend"
 version = "0.1.0"
 authors = ["Jeffrey.Carter <JeffreyKCarter@gmail.com>"]
 publish = false
+build = "build.rs"
 
 [dependencies]
 rand = "0.6.1"          # MIT/Apache-2.0
 
-web-view = "0.2.1"      # MIT
+web-view = "0.4.0"      # MIT
 
 # SERialization & DEserialization
 serde = "1.0.75"        # MIT/Apache-2.0

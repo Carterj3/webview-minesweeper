@@ -15,72 +15,90 @@ extern crate log;
 extern crate env_logger;
 use env_logger::{Builder, Target};
  
-use std::thread::spawn;
-use std::sync::Mutex;
+use std::thread;
+use std::sync::{Arc, Mutex};
 use std::env;
+
 
 fn main() {
     configure_logger();
 
-    let title = "Minesweeper";
-    let content = Content::Html(create_html());
-	let size = Some((800, 600));
-	let is_resizable = true;
-	let in_debug = false;
+    let game = Arc::new(Mutex::new(Minesweeper::new(Horizontal(8), Vertical(8), 10).unwrap()));
+    let game_callback = game.clone();
+    let game_handle = game.clone();
 
-    let state = Mutex::new(Minesweeper::new(Horizontal(8), Vertical(8), 10).unwrap());
+    let web_view = web_view::builder()
+        .title("Minesweeper")
+        .content(Content::Html(create_html()))
+        .size(800, 600)
+        .resizable(true)
+        .debug(false)
+        .user_data(game)
+        .invoke_handler( |webview, arg| {
+            trace!("Received from UI: {}", arg);
+
+            let mut game = game_callback.lock().unwrap();
+
+            match serde_json::from_str(arg)
+            {
+                Ok(Action::Start{ width, height, num_bombs }) => 
+                {
+                    match game.resize(Horizontal(width), Vertical(height), num_bombs)
+                    {
+                        Ok(_) => {},
+                        Err(error) => error!("failed to resize because {}", error),
+                    }
+                    send_to_ui(webview, &ToUiCommand::NewField {tiles: game.get_tiles()});
+                    send_to_ui(webview, &ToUiCommand::InProgress);
+                },
+                Ok(Action::Quit) => webview.terminate(),
+                Ok(action) =>
+                {
+                    match game.handle_action(action)
+                    {
+                        Ok(_) => {},
+                        Err(error) => error!("Action failed because: {}", error),
+                    }
+                    send_to_ui(webview, &ToUiCommand::NewField {tiles: game.get_tiles()});
+                    match game.get_state()
+                    {
+                        State::Won => send_to_ui(webview, &ToUiCommand::Won),
+                        State::Loss => send_to_ui(webview, &ToUiCommand::Loss),
+                        _ => send_to_ui(webview, &ToUiCommand::InProgress),
+                    };
+                }
+                Err(error) => error!("Unable to parse [{}] because {}", arg, error),
+            };
+
+            Ok(())
+        })
+        .build()
+        .unwrap();
+
+    let handle = web_view.handle();
+    thread::spawn(move || {
+        handle.dispatch(move |webview| {
+            let game = game_handle.lock().unwrap();
+
+            send_to_ui(webview, &ToUiCommand::NewField {tiles: game.get_tiles()});
+            send_to_ui(webview, &ToUiCommand::InProgress);
+
+            /*
+                The examples typically have the initial callback having a loop but a loop isn't needed for Minesweeper.
+
+                Running the loop faster than once per ~100 microseconds appears to cause crashes though.
+            */
+            Ok(())
+        })
+        .unwrap();
+    });
+
+    let res = web_view.run().unwrap();
+
+    println!("final state: {:?}", res);
+
+
  
-	run(title, content, size, is_resizable, in_debug, move |webview| {
-		spawn(move || {
-            webview.dispatch(|webview, state| {
-                let game = state.lock().unwrap();
-
-                send_to_ui(webview, &ToUiCommand::NewField {tiles: game.get_tiles()});
-                send_to_ui(webview, &ToUiCommand::InProgress);
-
-                /*
-                    The examples typically have the initial callback having a loop but a loop isn't needed for Minesweeper.
-
-                    Running the loop faster than once per ~100 microseconds appears to cause crashes though.
-                */
-            });
-		});
-	}, move |webview, arg, state| {
-        trace!("Received from UI: {}", arg);
-
-        let mut game = state.lock().unwrap();
-
-        match serde_json::from_str(arg)
-        {
-            Ok(Action::Start{ width, height, num_bombs }) => 
-            {
-                match game.resize(Horizontal(width), Vertical(height), num_bombs)
-                {
-                    Ok(_) => {},
-                    Err(error) => error!("failed to resize because {}", error),
-                }
-                send_to_ui(webview, &ToUiCommand::NewField {tiles: game.get_tiles()});
-                send_to_ui(webview, &ToUiCommand::InProgress);
-            },
-            Ok(Action::Quit) => webview.terminate(),
-            Ok(action) =>
-            {
-                match game.handle_action(action)
-                {
-                    Ok(_) => {},
-                    Err(error) => error!("Action failed because: {}", error),
-                }
-                send_to_ui(webview, &ToUiCommand::NewField {tiles: game.get_tiles()});
-                match game.get_state()
-                {
-                    State::Won => send_to_ui(webview, &ToUiCommand::Won),
-                    State::Loss => send_to_ui(webview, &ToUiCommand::Loss),
-                    _ => send_to_ui(webview, &ToUiCommand::InProgress),
-                };
-            }
-            Err(error) => error!("Unable to parse [{}] because {}", arg, error),
-        };
-	}, state);
 }
 
 #[derive(Serialize, Debug)]
@@ -100,10 +118,13 @@ pub fn send_to_ui<'a, S, T>(webview: &mut WebView<'a, T>, data: &S)
     {
         Ok(json) => 
         {
-            webview.eval(&format!("toFrontEnd({})", json));
-            trace!("Sent to UI")
+            match webview.eval(&format!("toFrontEnd({})", json))
+            {
+                Ok(_) => trace!("Sent to UI"),
+                Err(error) => error!("failed to send to ui because {}", error),
+            }
         },
-        Err(error) => error!("failed to send to ui because {}", error),
+        Err(error) => error!("failed to serialize for ui because {}", error),
     };
 }
 
@@ -118,7 +139,6 @@ fn configure_logger()
     builder.init();
 }
 
-// TODO?: Handle this via build.rs 
 fn create_html() -> String
 {
     format!(r#"
@@ -145,7 +165,7 @@ fn create_html() -> String
     )
 }
 
-const ELM_JS: &'static str = include_str!(concat!("../../", "minesweeper-ui/elm.js"));
+const ELM_JS: &'static str = include_str!(concat!(env!("OUT_DIR"), "/elm.js"));
 const PORTS_JS: &'static str = r#"
         var app = Elm.Main.init({node: document.getElementById("view")});
 
